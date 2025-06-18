@@ -1,18 +1,22 @@
 package plugin
 
 import (
-	"git.zabbix.com/ap/plugin-support/conf"
-	"git.zabbix.com/ap/plugin-support/metric"
-	"git.zabbix.com/ap/plugin-support/plugin"
-	"github.com/go-co-op/gocron"
+	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-co-op/gocron"
+	"golang.zabbix.com/sdk/conf"
+	"golang.zabbix.com/sdk/errs"
+	"golang.zabbix.com/sdk/metric"
+	"golang.zabbix.com/sdk/plugin"
+	"golang.zabbix.com/sdk/plugin/container"
 )
 
 const (
-	pluginName  = "APT"
+	PluginName  = "APT"
 	keyUpdates  = "apt.updates"
 	keySecurity = "apt.security"
 )
@@ -31,9 +35,7 @@ type Plugin struct {
 	options   Options
 }
 
-var Impl Plugin
-
-func (p *Plugin) Export(key string, _ []string, _ plugin.ContextProvider) (result interface{}, err error) {
+func (p *Plugin) Export(key string, _ []string, _ plugin.ContextProvider) (result any, err error) {
 	switch key {
 	case keyUpdates:
 		return p.updates, nil
@@ -73,21 +75,23 @@ var updateMetrics = func(p *Plugin) {
 }
 
 func (p *Plugin) Start() {
+	fmt.Println("Starting")
 	_, _ = p.scheduler.Every(p.options.Interval).Minutes().StartImmediately().Do(updateMetrics, p)
 	p.scheduler.StartAsync()
 }
 
 func (p *Plugin) Stop() {
+	fmt.Println("Stopping")
 	p.scheduler.Stop()
 }
 
-func (p *Plugin) Configure(_ *plugin.GlobalOptions, options interface{}) {
+func (p *Plugin) Configure(_ *plugin.GlobalOptions, options any) {
 	if err := conf.Unmarshal(options, &p.options); err != nil {
 		p.Errf("cannot unmarshal configuration options: %s", err)
 	}
 }
 
-func (p *Plugin) Validate(options interface{}) error {
+func (p *Plugin) Validate(options any) error {
 	var opts Options
 
 	return conf.Unmarshal(options, &opts)
@@ -98,10 +102,31 @@ var metrics = metric.MetricSet{
 	keySecurity: metric.New("Security Updates", []*metric.Param{}, false),
 }
 
-func init() {
-	Impl.updates = 0
-	Impl.security = 0
-	Impl.scheduler = gocron.NewScheduler(time.UTC)
-	Impl.scheduler.SetMaxConcurrentJobs(1, gocron.RescheduleMode)
-	plugin.RegisterMetrics(&Impl, pluginName, metrics.List()...)
+func Launch() error {
+	p := &Plugin{
+		updates:   0,
+		security:  0,
+		scheduler: gocron.NewScheduler(time.UTC),
+	}
+	p.scheduler.SetMaxConcurrentJobs(1, gocron.RescheduleMode)
+
+	err := plugin.RegisterMetrics(p, PluginName, metrics.List()...)
+	if err != nil {
+		return errs.Wrap(err, "failed to register metrics")
+	}
+
+	fmt.Println("Creating Plugin Handler")
+	h, err := container.NewHandler(PluginName)
+	if err != nil {
+		return errs.Wrap(err, "failed to create plugin handler")
+	}
+	p.Logger = &h
+
+	fmt.Println("Execute")
+	err = h.Execute()
+	if err != nil {
+		return errs.Wrap(err, "failed to execute plugin handler")
+	}
+
+	return nil
 }
