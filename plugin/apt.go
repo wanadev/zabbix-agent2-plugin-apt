@@ -47,6 +47,7 @@ func (p *Plugin) Export(key string, _ []string, _ plugin.ContextProvider) (resul
 }
 
 var updateMetrics = func(p *Plugin) {
+	fmt.Println("updateMetrics")
 	p.Debugf("updateMetrics")
 
 	commands := map[string]string{
@@ -86,15 +87,22 @@ func (p *Plugin) Stop() {
 }
 
 func (p *Plugin) Configure(_ *plugin.GlobalOptions, options any) {
+	fmt.Println("Configure")
 	if err := conf.Unmarshal(options, &p.options); err != nil {
 		p.Errf("cannot unmarshal configuration options: %s", err)
 	}
 }
 
 func (p *Plugin) Validate(options any) error {
+	fmt.Println("Validate")
 	var opts Options
 
-	return conf.Unmarshal(options, &opts)
+	err := conf.Unmarshal(options, &opts)
+	if err != nil {
+		return errs.Wrap(err, "failed to unmarshal configuration options")
+	}
+
+	return nil
 }
 
 var metrics = metric.MetricSet{
