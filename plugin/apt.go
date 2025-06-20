@@ -1,10 +1,11 @@
 package plugin
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-co-op/gocron"
@@ -15,10 +16,17 @@ import (
 	"golang.zabbix.com/sdk/plugin/container"
 )
 
+type MetricKey string
+
 const (
-	PluginName  = "APT"
-	keyUpdates  = "apt.updates"
-	keySecurity = "apt.security"
+	PluginName = "APT"
+
+	metricPackagesUpgradeSummaryCount = MetricKey("apt.packagesupgradesummary.count")
+	metricPackagesUpgradeSummaryDesc  = MetricKey("apt.packagesupgradesummary.description")
+	metricPackagesKeptBackDesc        = MetricKey("apt.keptbackupdates.description")
+	metricPackagesNewlyInstalledDesc  = MetricKey("apt.newlyinstalled.description")
+	metricPackagesReadyToUpgradeDesc  = MetricKey("apt.readytoupgrade.description")
+	metricPackagesToRemoveDesc        = MetricKey("apt.toremove.description")
 )
 
 type Options struct {
@@ -29,50 +37,138 @@ type Options struct {
 
 type Plugin struct {
 	plugin.Base
-	updates   int
-	security  int
-	scheduler *gocron.Scheduler
-	options   Options
+	updatesCount       int
+	updatesSumDesc     string
+	keptBackDesc       string
+	newlyInstalledDesc string
+	readyToUpgradeDesc string
+	toRemoveDesc       string
+	scheduler          *gocron.Scheduler
+	options            Options
 }
 
 func (p *Plugin) Export(key string, _ []string, _ plugin.ContextProvider) (result any, err error) {
 	switch key {
-	case keyUpdates:
-		return p.updates, nil
-	case keySecurity:
-		return p.security, nil
+	case string(metricPackagesUpgradeSummaryCount):
+		return p.updatesCount, nil
+	case string(metricPackagesUpgradeSummaryDesc):
+		return p.updatesSumDesc, nil
+	case string(metricPackagesKeptBackDesc):
+		return p.keptBackDesc, nil
+	case string(metricPackagesNewlyInstalledDesc):
+		return p.newlyInstalledDesc, nil
+	case string(metricPackagesReadyToUpgradeDesc):
+		return p.readyToUpgradeDesc, nil
+	case string(metricPackagesToRemoveDesc):
+		return p.toRemoveDesc, nil
 	default:
 		return nil, plugin.UnsupportedMetricError
 	}
+}
+
+func convertStringToNumber(str string) (int, error) {
+	num, err := strconv.Atoi(str)
+	if err != nil {
+		errs.Wrap(err, "failed to convert string to number")
+	}
+
+	return num, err
+}
+
+func getMetricsFromOutput(output string) ([]int, error) {
+	// summarized output of apt upgrade looks like
+	// "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded."
+	// Beware that it can change in the future, if apt output version is configured differently
+	// see https://salsa.debian.org/apt-team/apt/-/blob/main/apt-private/private-output.cc?ref_type=heads
+	re := regexp.MustCompile(`(\d+) upgraded, (\d+) newly installed, (\d+) to remove and (\d+) not upgraded.`)
+	match := re.FindStringSubmatch(output)
+
+	if len(match) != 4 {
+		return nil, errors.New("failed to parse upgrade output, wrong format")
+	}
+	// convert
+	var numbers []int
+	for _, number := range match {
+		integer, err := convertStringToNumber(number)
+		if err != nil {
+			return nil, errs.Wrap(err, "failed to convert string to number")
+		}
+		numbers = append(numbers, integer)
+	}
+
+	return numbers, nil
+}
+
+func getDescFromOutput(output string) []string {
+	var results []string
+	// If numbers are different than 0, there can be other paragraphs listing packages
+	// get the list of packages
+
+	upgradedRe := regexp.MustCompile(`will be upgraded:\n((  [0-9a-zA-Z-_. ]+\n)+)`)
+	upgradedMatch := upgradedRe.FindStringSubmatch(output)
+	if len(upgradedMatch) != 0 {
+		results = append(results, upgradedMatch[1])
+	} else {
+		results = append(results, "No packages to upgrade")
+	}
+
+	newlyInstalledRe := regexp.MustCompile(`NEW packages will be installed:\n((  [0-9a-zA-Z-_. ]+\n)+)`)
+	newlyInstalledMatch := newlyInstalledRe.FindStringSubmatch(output)
+	if len(newlyInstalledMatch) != 0 {
+		results = append(results, newlyInstalledMatch[1])
+	} else {
+		results = append(results, "No new packages to install")
+	}
+
+	toRemoveRe := regexp.MustCompile(`will be REMOVED:\n((  [0-9a-zA-Z-_. ]+\n)+)`)
+	toRemoveMatch := toRemoveRe.FindStringSubmatch(output)
+	if len(toRemoveMatch) != 0 {
+		results = append(results, toRemoveMatch[1])
+	} else {
+		results = append(results, "No packages to remove")
+	}
+
+	keptBackRe := regexp.MustCompile(`have been kept back:\n((  [0-9a-zA-Z-_. ]+\n)+)`)
+	keptBackMatch := keptBackRe.FindStringSubmatch(output)
+	if len(keptBackMatch) != 0 {
+		results = append(results, keptBackMatch[1])
+	} else {
+		results = append(results, "No packages were kept back")
+	}
+
+	return results
 }
 
 var updateMetrics = func(p *Plugin) {
 	fmt.Println("updateMetrics")
 	p.Debugf("updateMetrics")
 
-	commands := map[string]string{
-		keyUpdates:  "apt-get -s upgrade | grep 'upgraded,.*newly installed,' | cut -d ' ' -f1",
-		keySecurity: "apt-get -s upgrade | grep 'standard security updates' | cut -d ' ' -f1",
+	upgradeCommand := "apt-get -s upgrade"
+
+	out, err := exec.Command("bash", "-c", upgradeCommand).Output()
+	if err != nil {
+		p.Errf("cannot execute .: %s", err)
+		return
 	}
 
-	for key, cmd := range commands {
-		out, err := exec.Command("bash", "-c", cmd).Output()
-
-		if err != nil {
-			p.Errf("cannot execute %s: %s", key, err)
-		}
-
-		packages, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 32)
-
-		switch key {
-		case keyUpdates:
-			p.updates = int(packages)
-			break
-		case keySecurity:
-			p.security = int(packages)
-			break
-		}
+	numbers, err := getMetricsFromOutput(string(out))
+	if err != nil {
+		p.Errf("cannot parse: %s", err)
+		return
 	}
+	totalPackageCount := numbers[0] + numbers[1]
+
+	descriptions := getDescFromOutput(string(out))
+
+	// save the results
+	p.updatesCount = totalPackageCount
+	p.updatesSumDesc = fmt.Sprintf("%s upgraded", totalPackageCount)
+
+	p.keptBackDesc = descriptions[3]
+	p.newlyInstalledDesc = descriptions[1]
+	p.readyToUpgradeDesc = descriptions[0]
+	p.toRemoveDesc = descriptions[2]
+
 }
 
 func (p *Plugin) Start() {
@@ -106,15 +202,23 @@ func (p *Plugin) Validate(options any) error {
 }
 
 var metrics = metric.MetricSet{
-	keyUpdates:  metric.New("Available Updates", []*metric.Param{}, false),
-	keySecurity: metric.New("Security Updates", []*metric.Param{}, false),
+	string(metricPackagesUpgradeSummaryCount): metric.New("Available updates summary count", []*metric.Param{}, false),
+	string(metricPackagesUpgradeSummaryDesc):  metric.New("Available updates summary description", []*metric.Param{}, false),
+	string(metricPackagesKeptBackDesc):        metric.New("Kept back packages description", []*metric.Param{}, false),
+	string(metricPackagesNewlyInstalledDesc):  metric.New("Newly installed packages description", []*metric.Param{}, false),
+	string(metricPackagesReadyToUpgradeDesc):  metric.New("Available updates description", []*metric.Param{}, false),
+	string(metricPackagesToRemoveDesc):        metric.New("Packages to be removed description", []*metric.Param{}, false),
 }
 
 func Launch() error {
 	p := &Plugin{
-		updates:   0,
-		security:  0,
-		scheduler: gocron.NewScheduler(time.UTC),
+		updatesCount:       0,
+		updatesSumDesc:     "",
+		keptBackDesc:       "",
+		newlyInstalledDesc: "",
+		readyToUpgradeDesc: "",
+		toRemoveDesc:       "",
+		scheduler:          gocron.NewScheduler(time.UTC),
 	}
 	p.scheduler.SetMaxConcurrentJobs(1, gocron.RescheduleMode)
 
