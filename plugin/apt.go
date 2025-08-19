@@ -162,7 +162,7 @@ var updateMetrics = func(p *Plugin) {
 
 	// save the results
 	p.updatesCount = totalPackageCount
-	p.updatesSumDesc = fmt.Sprintf("%s upgraded", totalPackageCount)
+	p.updatesSumDesc = fmt.Sprintf("%d upgraded", totalPackageCount)
 
 	p.keptBackDesc = descriptions[3]
 	p.newlyInstalledDesc = descriptions[1]
