@@ -143,7 +143,7 @@ var updateMetrics = func(p *Plugin) {
 	fmt.Println("updateMetrics")
 	p.Debugf("updateMetrics")
 
-	upgradeCommand := "apt-get -s upgrade"
+	upgradeCommand := "LANGUAGE=C apt-get -s upgrade"
 
 	out, err := exec.Command("bash", "-c", upgradeCommand).Output()
 	if err != nil {
