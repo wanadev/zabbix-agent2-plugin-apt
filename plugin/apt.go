@@ -1,7 +1,6 @@
 package plugin
 
 import (
-	"errors"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -81,14 +80,14 @@ func getMetricsFromOutput(output string) ([]int, error) {
 	// Beware that it can change in the future, if apt output version is configured differently
 	// see https://salsa.debian.org/apt-team/apt/-/blob/main/apt-private/private-output.cc?ref_type=heads
 	re := regexp.MustCompile(`(\d+) upgraded, (\d+) newly installed, (\d+) to remove and (\d+) not upgraded.`)
-	match := re.FindStringSubmatch(output)
+	matches := re.FindStringSubmatch(output)
 
-	if len(match) != 4 {
-		return nil, errors.New("failed to parse upgrade output, wrong format")
+	if len(matches) != 5 {
+		return nil, fmt.Errorf("failed to parse upgrade output, wrong format")
 	}
 	// convert
 	var numbers []int
-	for _, number := range match {
+	for _, number := range matches[1:] {
 		integer, err := convertStringToNumber(number)
 		if err != nil {
 			return nil, errs.Wrap(err, "failed to convert string to number")
